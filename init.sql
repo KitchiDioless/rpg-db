@@ -1,0 +1,3 @@
+CREATE USER migrator WITH PASSWORD 'sosiska' CREATEDB;
+CREATE DATABASE migrator OWNER migrator;
+GRANT ALL PRIVILEGES ON DATABASE migrator TO migrator;

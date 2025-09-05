@@ -1,0 +1,4 @@
+CREATE USER migrator WITH PASSWORD 'sosiska' CREATEDB;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE DATABASE migrator OWNER migrator;
+GRANT ALL PRIVILEGES ON DATABASE migrator TO migrator; 

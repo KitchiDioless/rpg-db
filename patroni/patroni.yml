@@ -1,0 +1,81 @@
+scope: pg_cluster
+namespace: /service/
+name: ${PATRONI_NAME}
+
+restapi:
+  listen: ${PATRONI_REST_API_LISTEN}
+  connect_address: ${PATRONI_NAME}:8008
+
+dns:
+  ttl: 30
+  loop_wait: 10
+  retry_timeout: 10
+  post_init: false
+
+etcd:
+  url: ${PATRONI_ETCD_URL}
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        max_connections: 100
+        max_locks_per_transaction: 64
+        max_worker_processes: 8
+        max_prepared_transactions: 0
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_level: replica
+        hot_standby: "on"
+        wal_keep_segments: 8
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+    - locale: en_US.UTF-8
+  users:
+    replicator:
+      password: replpass
+      options:
+        - replication
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0 md5
+  post_bootstrap: /usr/local/bin/psql -f /init.sql
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: ${PATRONI_NAME}:5432
+  data_dir: ${PATRONI_POSTGRESQL_DATA_DIR}
+  bin_dir: /usr/lib/postgresql/15/bin
+  authentication:
+    superuser:
+      username: ${PATRONI_POSTGRESQL_USERNAME}
+      password: ${PATRONI_POSTGRESQL_PASSWORD}
+    replication:
+      username: replicator
+      password: replpass
+  parameters:
+    max_connections: 100
+    shared_buffers: "256MB"
+    wal_level: replica
+    hot_standby: "on"
+    max_wal_senders: 10
+    max_replication_slots: 10
+    wal_keep_segments: 8
+    archive_mode: "on"
+    archive_command: "test ! -f /tmp/archive/%f && cp %p /tmp/archive/%f"
+    restore_command: "cp /tmp/archive/%f %p"
+    shared_preload_libraries: 'pg_stat_statements'
+    pg_stat_statements.max: 10000
+    pg_stat_statements.track: all
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

@@ -1,0 +1,193 @@
+version: '3.9'
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: etcd
+    environment:
+      ETCD_NAME: etcd
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      ETCD_ENABLE_V2: "true"
+    ports:
+      - "2379:2379"
+    networks:
+      - pgnet
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  patroni1:
+    build:
+      context: ./patroni
+      dockerfile: Dockerfile
+    container_name: patroni1
+    hostname: patroni1
+    ports:
+      - "5432:5432"
+      - "8008:8008"
+    environment:
+      PATRONI_NAME: patroni1
+      PATRONI_SCOPE: pg_cluster
+      PATRONI_REST_API_LISTEN: 0.0.0.0:8008
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
+      PATRONI_ETCD_URL: http://etcd:2379
+      PATRONI_POSTGRESQL_USERNAME: migrator
+      PATRONI_POSTGRESQL_PASSWORD: sosiska
+      PATRONI_POSTGRESQL_DBNAME: migrator
+    volumes:
+      - pgdata1:/var/lib/postgresql/data
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - pgnet
+      - monitornet
+
+  patroni2:
+    build:
+      context: ./patroni
+      dockerfile: Dockerfile
+    container_name: patroni2
+    hostname: patroni2
+    ports:
+      - "5433:5432"
+      - "8009:8008"
+    environment:
+      PATRONI_NAME: patroni2
+      PATRONI_SCOPE: pg_cluster
+      PATRONI_REST_API_LISTEN: 0.0.0.0:8008
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
+      PATRONI_ETCD_URL: http://etcd:2379
+      PATRONI_POSTGRESQL_USERNAME: migrator
+      PATRONI_POSTGRESQL_PASSWORD: sosiska
+      PATRONI_POSTGRESQL_DBNAME: migrator
+    volumes:
+      - pgdata2:/var/lib/postgresql/data
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - pgnet
+      - monitornet
+
+  haproxy:
+    image: haproxy:2.9
+    container_name: haproxy
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg
+    ports:
+      - "5434:5432"
+      - "5435:5433"
+    depends_on:
+      - patroni1
+      - patroni2
+    networks:
+      - pgnet
+      - monitornet
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  flyway:
+    image: flyway/flyway:9
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    command: >
+      -url=jdbc:postgresql://haproxy:5432/migrator
+      -user=migrator
+      -password=sosiska
+      -schemas=public
+      -locations=filesystem:/flyway/sql
+      -target=${MIGRATION_VERSION:-latest}
+      -connectRetries=60
+      migrate
+    volumes:
+      - ./migrations:/flyway/sql
+    networks:
+      - pgnet
+
+  seeder:
+    build: ./seeder
+    depends_on:
+      flyway:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV}
+      SEED_COUNT: ${SEED_COUNT:-10}
+    entrypoint: ["./wait-for-it.sh", "haproxy:5432", "--", "python", "seed.py"]
+    networks:
+      - pgnet
+
+  load_service:
+    build: ./load_service
+    container_name: load_service
+    environment:
+      DB_HOST: haproxy
+      DB_NAME: migrator
+      DB_USER: migrator
+      DB_PASS: sosiska
+    depends_on:
+      - haproxy
+    networks:
+      - pgnet
+      - monitornet
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - monitornet
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - monitornet
+
+  backup:
+    build:
+      context: ./backup
+    container_name: pg_backup
+    environment:
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-7}
+      BACKUP_INTERVAL_CRON: "${BACKUP_INTERVAL_CRON:-0 * * * *}"
+      DB_HOST: haproxy
+      DB_NAME: migrator
+      DB_USER: migrator
+      PGPASSWORD: sosiska
+    volumes:
+      - backups:/backups
+    networks:
+      - pgnet
+      - monitornet
+
+volumes:
+  pgdata1:
+  pgdata2:
+  backups:
+
+networks:
+  pgnet:
+  monitornet:
